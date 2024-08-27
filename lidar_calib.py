@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import messagebox
+import tkinter.ttk as ttk
+from tkinter import messagebox, filedialog
 from PIL import Image, ImageTk
 import argparse
 import os
@@ -8,6 +9,8 @@ import json
 from camera_lidar_calibration import CameraLidarCalibration
 import cv2
 from lidar_calib_util import LidarCalibUtil
+from ui.transform_label import TransformLabel
+from dataset_process import DatasetProcess
 
 LIDAR_IMAGE_SCALE = 4
 
@@ -23,26 +26,40 @@ class ImageClickApp:
         self.pairs = []
         self.selected_index = None
 
-        self.camera_image = self.load_camera_image()
-        self.lidar_image = self.load_lidar_image()
+        """""" """""" """""" """
+        폴더 경로 입력 프레임
+        """ """""" """""" """"""
 
-        self.camera_tk_image = ImageTk.PhotoImage(self.camera_image)
-        self.lidar_tk_image_full = ImageTk.PhotoImage(self.lidar_image)
+        self.folder_path_frame = tk.Frame(root)
+        self.folder_path_frame.grid(row=0, column=0, sticky="nsew")
+        self.folder_path_label = tk.Label(self.folder_path_frame, text="Folder Path")
+        self.folder_path_label.pack(side=tk.LEFT)
+        self.folder_path_entry = tk.Entry(self.folder_path_frame)
+        self.folder_path_entry.pack(side=tk.LEFT)
+
+        def load_image_from_entry():
+            folder_path = filedialog.askdirectory(initialdir=self.args.init_root_path)
+            if folder_path:
+                self.folder_path_entry.delete(0, tk.END)
+                self.folder_path_entry.insert(0, folder_path)
+                self.load_image(folder_path)
+
+        self.folder_path_button = tk.Button(
+            self.folder_path_frame, text="Load", command=load_image_from_entry
+        )
+        self.folder_path_button.pack(side=tk.LEFT)
 
         # 메인 프레임
         main_frame = tk.Frame(root)
-        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.grid(row=1, column=0, sticky="nsew")
 
         # 카메라 캔버스 크기 설정
         self.canvas = tk.Canvas(
             main_frame,
-            width=self.camera_tk_image.width(),
-            height=self.camera_tk_image.height() + self.lidar_image.height,
+            width=1440,
+            height=928 + 128 * 4,
         )
         self.canvas.grid(row=0, column=0, columnspan=2, sticky="nsew")
-
-        # 카메라 이미지 배치
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.camera_tk_image)
 
         # 리스트뷰 및 버튼 프레임
         side_frame = tk.Frame(main_frame)
@@ -64,11 +81,6 @@ class ImageClickApp:
             side_frame, text="Save Points", command=self.save_points_ply
         )
         save_points_button.pack(pady=5)
-
-        transform_button = tk.Button(
-            side_frame, text="Compute Transform", command=self.compute_transform
-        )
-        transform_button.pack(pady=5)
 
         ### Colorbar Scaling 스크롤 버튼
         self.MAX_LIDAR_RANGE = 10000
@@ -100,18 +112,23 @@ class ImageClickApp:
         )
         btn_stereo_max_right.pack(pady=5)
 
+        btn_process_dataset = tk.Button(
+            side_frame, text="Process Dataset", command=self.process_dataset
+        )
+        btn_process_dataset.pack(pady=5)
+
+        self.progressbar_dataset = ttk.Progressbar(
+            side_frame, orient=tk.HORIZONTAL, length=500, mode="determinate"
+        )
+        self.progressbar_dataset.pack(pady=5)
+
         # 라이다 이미지 스크롤 설정
         self.scroll_x = 0  # 스크롤 위치를 관리하는 변수
-        self.view_width = (
-            self.lidar_image.width // LIDAR_IMAGE_SCALE
-        )  # 가로의 1/4만 보이게 설정
-
-        # 캔버스 위에 라이다 이미지 부분을 그리기 위한 초기 이미지 크롭
-        self.update_lidar_image()
+        self.view_width = 1024  # 가로의 1/4만 보이게 설정
 
         # 스크롤바 추가
         scrollbar = tk.Scrollbar(root, orient=tk.HORIZONTAL, command=self.scroll_lidar)
-        scrollbar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        scrollbar.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.canvas.config(xscrollcommand=scrollbar.set)
 
         # 키 이벤트 바인딩
@@ -121,19 +138,33 @@ class ImageClickApp:
         # 클릭 이벤트 바인딩
         self.canvas.bind("<Button-1>", self.on_click)
 
-        transform_result_frame = tk.Frame(root)
-        transform_result_frame.grid(row=2, column=0, sticky="nsew")
+        self.transform_label = TransformLabel(root)
+        self.transform_label._save_transform = self.save_transform
+        self.transform_label._compute_transform = self.compute_transform
+        self.transform_label._read_transform = self.read_transform_from_npz
+        self.transform_label().grid(row=3, column=0, sticky="nsew")
 
-        self.transform_result_text = tk.Text(
-            transform_result_frame, height=10, width=40
-        )
-        self.transform_result_text.pack(side=tk.LEFT, fill=tk.BOTH)
-
-        self.transform_result_image_view = tk.Label(transform_result_frame, image=None)
-        self.transform_result_image_view.pack(side=tk.RIGHT, fill=tk.BOTH)
         self.update_pairs_listview()
 
+        if args.folder_path:
+            self.folder_path_entry.insert(0, args.folder_path)
+            self.load_image(args.folder_path)
+
     ##### Colorbar Scaling 스크롤 버튼 함수
+
+    def process_dataset(self):
+        mtx = self.transform_label.get_quaternion_from_eular()
+        folder = filedialog.askdirectory(initialdir=self.args.init_root_path)
+
+        def update_progressbar(p_idx, msg):
+            self.progressbar_dataset.config(value=p_idx)
+            print(f"{p_idx}% f{msg}")
+            self.progressbar_dataset
+
+        if folder and mtx is not None:
+            dataset_process = DatasetProcess(folder)
+            folders = dataset_process.search_folder(folder)
+            dataset_process.process_scene_list(folders, mtx, update_progressbar)
 
     def lidar_max_minus(self):
         self.MAX_LIDAR_RANGE -= 1000
@@ -223,6 +254,8 @@ class ImageClickApp:
             data = np.load(raw_npz_path.replace("raw", "pairs"))
             pairs = data["pairs"]
             self.read_pairs(pairs)
+        else:
+            self.pairs = []
 
         # disparity.png가 있는지 확인
         disparity_path = os.path.join(folder_path, "disparity.png")
@@ -403,32 +436,98 @@ class ImageClickApp:
         np.savez(save_path, pairs=pair_np)
         messagebox.showinfo("Saved", f"Pairs have been saved to {save_path}")
 
-    def compute_transform(self):
-        pairs = np.load(self.args.folder_path + "/pairs.npz")["pairs"]
+    def save_transform(self, transform: np.ndarray):
+        post_npz = np.load(self.args.folder_path + "/post.npz")
+        post_npz = {**post_npz, "transform": transform}
+        np.savez(self.args.folder_path + "/post.npz", **post_npz)
+        messagebox.showinfo("Saved", "Transform has been saved.")
+
+    def read_transform_from_npz(self):
+        """
+        Read lidar transform mtx from post.npz if it exists
+        """
+        post_npz = np.load(self.args.folder_path + "/post.npz")
+        if "transform" in post_npz:
+            init_mtx = post_npz["transform"]
+            return init_mtx
+        return None
+
+    def read_camera_intrinsic(self):
+        """
+        Read left camera intrinsic, stereo baseline, and disparity map from post.npz
+        """
         post_npz = np.load(self.args.folder_path + "/post.npz")
         k_left = post_npz["k_left"]
         baseline = np.linalg.norm(post_npz["T"])
         disparity = post_npz["disparity"]
+        depth = post_npz["depth"]
+        d_left = post_npz["d_left"]
+        k_right = post_npz["k_right"]
+        d_right = post_npz["d_right"]
+        R = post_npz["R"]
+        T = post_npz["T"]
+
+        return k_left, baseline, disparity, depth, d_left, k_right, d_right, R, T
+
+    def read_stereo_depth(self):
+        post_npz = np.load(self.args.folder_path + "/post.npz")
+        return post_npz["depth"]
+
+    def compute_transform(self, use_pair=True, use_open3d=False):
+        pairs_npz_path = self.args.folder_path + "/pairs.npz"
+        pairs = (
+            np.load(pairs_npz_path)["pairs"]
+            if use_pair and os.path.exists(pairs_npz_path)
+            else None
+        )
+        init_mtx = None
+        if not use_pair or pairs is None:
+            init_mtx = self.transform_label.get_quaternion_from_eular()
+            if init_mtx is None:
+                init_mtx = self.read_transform_from_npz()
+        k_left, baseline, disparity, depth, d_left, k_right, d_right, R, T = (
+            self.read_camera_intrinsic()
+        )
         points = self.npz_data["points"]
 
         calibration = CameraLidarCalibration(
-            self.args, disparity, points, k_left, baseline, pairs
+            self.args,
+            disparity,
+            points,
+            k_left,
+            baseline,
+            pairs,
+            init_mtx,
+            max_depth=self.transform_label.get_depth_max_option(),
+            remap_mask=self.remap_mask if hasattr(self, "remap_mask") else None,
         )
-        transform = calibration.estimate_transform()
-        post_npz = np.load(self.args.folder_path + "/post.npz")
-        post_npz = {**post_npz, "transform": transform}
-        np.savez(self.args.folder_path + "/post.npz", **post_npz)
-        text_update = "Transform matrix:\n" + str(transform)
-        self.transform_result_text.delete(1.0, tk.END)
-        self.transform_result_text.insert(tk.END, text_update)
+        if not hasattr(self, "remap_mask"):
+            self.remap_mask = calibration.compute_remap_mask(
+                disparity.shape[0],
+                disparity.shape[1],
+                k_left,
+                d_left,
+                k_right,
+                d_right,
+                R,
+                T,
+            )
+        transform = calibration.estimate_transform(use_open3d)
 
-        transform_image = calibration.transform_lidarpoints_to_image(
-            points, disparity.shape[:2]
+        self.transform_label.update_transform_result(transform)
+
+        transform_img, plot_list = calibration.render_transform_lidarpoints_to_image(
+            points, depth
         )
-        transform_image = Image.fromarray(transform_image)
+
+        cv2.imwrite(self.args.folder_path + "/transform_image.png", transform_img)
+        transform_image = Image.fromarray(transform_img[:, :, ::-1])
+        transform_image.resize(
+            (int(transform_image.width * 0.75), int(transform_image.height * 0.75))
+        )
         tkImage = ImageTk.PhotoImage(transform_image)
-        self.transform_result_image_view.configure(image=tkImage)
-        self.transform_result_image_view.image = tkImage
+        self.transform_label.transform_result_image_view.configure(image=tkImage)
+        self.transform_label.transform_result_image_view.image = tkImage
 
     def save_points_ply(self):
         self.util.store_point_cloud(self.npz_data["points"] * 1000, "points")
@@ -440,6 +539,21 @@ class ImageClickApp:
             "camera_points",
         )
 
+    def load_image(self, folder_path: str):
+        self.args.folder_path = folder_path
+        self.camera_image = self.load_camera_image()
+        self.lidar_image = self.load_lidar_image()
+
+        self.camera_tk_image = ImageTk.PhotoImage(self.camera_image)
+        self.lidar_tk_image_full = ImageTk.PhotoImage(self.lidar_image)
+        # 카메라 이미지 배치
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.camera_tk_image)
+        # 캔버스 위에 라이다 이미지 부분을 그리기 위한 초기 이미지 크롭
+        self.update_lidar_image()
+
+        if hasattr(self, "listbox"):
+            self.update_pairs_listview()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -448,8 +562,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--folder_path",
         type=str,
-        required=True,
+        required=False,
         help="Path to the folder containing the image files",
+    )
+    parser.add_argument(
+        "--init_root_path",
+        type=str,
+        default="/bean/lucid",
+        help="Initial root path for file dialog",
     )
 
     args = parser.parse_args()
